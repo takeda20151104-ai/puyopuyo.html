@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ぷよモード（HTML+JS 1ファイル）</title>
+  <style>
+    :root {
+      --bg: #0f172a; /* slate-900 */
+      --panel: #111827; /* gray-900 */
+      --text: #e5e7eb; /* gray-200 */
+      --accent: #22d3ee; /* cyan-400 */
+      --muted: #64748b; /* slate-500 */
+    }
+    html, body { height: 100%; }
+    body {
+      margin: 0; display: grid; place-items: center; background: radial-gradient(1200px 600px at 50% -20%, #1f2937, var(--bg));
+      color: var(--text); font-family: ui-rounded, system-ui, -apple-system, Segoe UI, Roboto, "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+    }
+    .wrap { display: grid; gap: 16px; grid-template-columns: auto auto; align-items: start; }
+    .panel { background: linear-gradient(180deg, #0b1220 0%, #0a0f1a 100%);
+      border: 1px solid #1f2a44; border-radius: 16px; padding: 16px; box-shadow: 0 8px 30px rgba(0,0,0,.35);
+    }
+    h1 { margin: 0 0 6px; font-size: 20px; letter-spacing: .03em; }
+    .meta { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+    canvas { image-rendering: pixelated; background: #0b1020; border-radius: 12px; border: 1px solid #1d2540; }
+    .side { width: 220px; }
+    .stat { display: grid; grid-template-columns: 1fr auto; gap: 6px; margin: 8px 0; font-variant-numeric: tabular-nums; }
+    .btns { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
+    button { appearance: none; border: 1px solid #243255; background: linear-gradient(180deg, #0f1a33, #0a1326);
+      color: var(--text); padding: 10px 12px; border-radius: 12px; cursor: pointer; font-weight: 600; letter-spacing: .02em; }
+    button:active { transform: translateY(1px); }
+    .wide { grid-column: span 3; }
+    .hint { font-size: 12px; color: var(--muted); line-height: 1.5; margin-top: 12px; }
+    .badge { display:inline-block; padding:.2em .5em; border:1px solid #224; border-radius:999px; color:#a5b4fc; background:#0b0f1f; font-size:11px; }
+    .nextBox { display:grid; grid-template-columns: repeat(2, 18px); grid-auto-rows: 18px; gap:2px; background:#0b1020; padding:6px; border-radius:8px; border:1px solid #1d2540; width:max-content; }
+    .cellPreview { width:18px; height:18px; border-radius: 4px; }
+    .mobile { display:none; }
+    @media (max-width: 720px){
+      .wrap { grid-template-columns: 1fr; }
+      .side { width:auto; }
+      .mobile { display:block; }
+      .btns { grid-template-columns: repeat(4,1fr); }
+      .wide { grid-column: span 4; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="panel">
+      <h1>ぷよモード <span class="badge">簡易版</span></h1>
+      <div class="meta">左右←→ / 回転↑ / ソフトドロップ↓ / ハードドロップ Space</div>
+      <canvas id="game" width="240" height="480" aria-label="game"></canvas>
+    </div>
+
+    <div class="panel side">
+      <div class="stat"><span>スコア</span><strong id="score">0</strong></div>
+      <div class="stat"><span>チェイン</span><strong id="chain">0</strong></div>
+      <div class="stat"><span>レベル</span><strong id="level">1</strong></div>
+      <div class="stat"><span>状態</span><strong id="state">READY</strong></div>
+      <div style="margin:10px 0 6px">NEXT</div>
+      <div id="next" class="nextBox" aria-label="next preview"></div>
+      <div class="btns">
+        <button id="start" class="wide">▶ スタート / リスタート</button>
+        <button id="left">←</button>
+        <button id="rot">↻</button>
+        <button id="right">→</button>
+        <button id="soft">↓</button>
+        <button id="hard" class="wide">Space: ハードドロップ</button>
+      </div>
+      <div class="hint">目的：同じ色が<strong>4つ以上</strong>つながると消える。<br>上まで積み上がるとゲームオーバー。<br>連鎖を作るとボーナス！</div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  // ===== Game Constants =====
+  const COLS = 6;          // 盤面の幅（列）
+  const ROWS = 12;         // 盤面の高さ（行）
+  const CELL = 40;         // 1マスのピクセル（canvasサイズは COLS*CELL x ROWS*CELL）
+  const COLORS = [
+    null,
+    '#ef4444', // 1 赤
+    '#3b82f6', // 2 青
+    '#22c55e', // 3 緑
+    '#eab308', // 4 黄
+    '#a855f7', // 5 紫（拡張用）
+  ];
+  const START_INTERVAL = 650; // 自然落下（ms）
+  const MIN_INTERVAL = 180;   // 最小落下速度
+  const SOFT_DROP_FACTOR = 0.35; // ソフトドロップ時の係数
+
+  // ===== Canvas & UI =====
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const scoreEl = document.getElementById('score');
+  const chainEl = document.getElementById('chain');
+  const levelEl = document.getElementById('level');
+  const stateEl = document.getElementById('state');
+  const startBtn = document.getElementById('start');
+  const nextBox = document.getElementById('next');
+  const btnLeft = document.getElementById('left');
+  const btnRight = document.getElementById('right');
+  const btnRot = document.getElementById('rot');
+  const btnSoft = document.getElementById('soft');
+  const btnHard = document.getElementById('hard');
+
+  // ===== Game State =====
+  let grid, active, nextPair, running = false, lastFall = 0, interval = START_INTERVAL;
+  let score = 0, level = 1, chain = 0, gameOver = false;
+  let softDrop = false;
+
+  function emptyGrid(){
+    return Array.from({length: ROWS}, () => Array(COLS).fill(0));
+  }
+
+  function randColor(){
+    // 1〜4色を使用（難しさはここで調整できる）
+    return 1 + Math.floor(Math.random() * 4);
+  }
+
+  function newPair(){
+    // 2つ組のぷよ（中心 + サブ）
+    return {
+      x: Math.floor(COLS / 2),
+      y: 0, // 中心の位置（サブは向きに応じてオフセット）
+      dir: 0, // 0:上,1:右,2:下,3:左（中心から見たサブの方向）
+      c1: randColor(),
+      c2: randColor(),
+    };
+  }
+
+  function pairCells(p){
+    // 中心とサブのマス座標 + 色を返す
+    const off = [[0,-1],[1,0],[0,1],[-1,0]][p.dir];
+    return [
+      {x: p.x, y: p.y, color: p.c1},
+      {x: p.x + off[0], y: p.y + off[1], color: p.c2},
+    ];
+  }
+
+  function inBounds(x,y){ return x>=0 && x<COLS && y>=0 && y<ROWS; }
+
+  function collides(p){
+    for(const c of pairCells(p)){
+      if(!inBounds(c.x,c.y) || grid[c.y][c.x]) return true;
+    }
+    return false;
+  }
+
+  function spawn(){
+    active = nextPair || newPair();
+    nextPair = newPair();
+    active.x = Math.floor(COLS/2);
+    active.y = 1; // 余裕を作る
+    active.dir = 0;
+    updateNextPreview();
+    if (collides(active)) {
+      // 置いた瞬間に衝突 → ゲームオーバー
+      running = false; gameOver = true; stateEl.textContent = 'GAME OVER';
+    }
+  }
+
+  function updateNextPreview(){
+    nextBox.innerHTML = '';
+    const preview = document.createDocumentFragment();
+    const colors = [nextPair.c1, nextPair.c2];
+    // 縦並びのプレビュー（上：c2 下：c1）
+    for(let r=0;r<2;r++){
+      for(let c=0;c<2;c++){
+        const div = document.createElement('div');
+        div.className = 'cellPreview';
+        const isPuyo = (c===0 && r===0) || (c===0 && r===1);
+        if(isPuyo){
+          div.style.background = COLORS[r===0? nextPair.c2 : nextPair.c1];
+          div.style.boxShadow = 'inset 0 0 6px rgba(255,255,255,.35)';
+        } else {
+          div.style.opacity = .2; div.style.border = '1px dashed #243255';
+        }
+        preview.appendChild(div);
+      }
+    }
+    nextBox.appendChild(preview);
+  }
+
+  function lockPair(){
+    for(const c of pairCells(active)){
+      if(inBounds(c.x,c.y)) grid[c.y][c.x] = c.color;
+    }
+  }
+
+  function applyGravity(){
+    // 各列ごとに下に詰める
+    for(let x=0;x<COLS;x++){
+      let write = ROWS-1;
+      for(let y=ROWS-1;y>=0;y--){
+        if(grid[y][x]!==0){
+          const val = grid[y][x];
+          grid[y][x]=0;
+          grid[write][x]=val;
+          write--;
+        }
+      }
+    }
+  }
+
+  function floodFill(x,y,color,visited){
+    const stack=[[x,y]]; const group=[];
+    while(stack.length){
+      const [cx,cy]=stack.pop();
+      const key=cx+','+cy; if(visited.has(key)) continue; visited.add(key);
+      if(!inBounds(cx,cy) || grid[cy][cx]!==color) continue;
+      group.push([cx,cy]);
+      stack.push([cx+1,cy],[cx-1,cy],[cx,cy+1],[cx,cy-1]);
+    }
+    return group;
+  }
+
+  function clearGroups(){
+    // 同色4つ以上のグループを全て消す。消去数と消去の有無を返す
+    const visited = new Set();
+    let toClear = [];
+    for(let y=0;y<ROWS;y++){
+      for(let x=0;x<COLS;x++){
+        const color = grid[y][x];
+        if(color===0) continue;
+        const key=x+','+y; if(visited.has(key)) continue;
+        const g = floodFill(x,y,color,visited);
+        if(g.length>=4) toClear.push(...g);
+      }
+    }
+    if(toClear.length===0) return 0;
+    for(const [x,y] of toClear){ grid[y][x]=0; }
+    return toClear.length;
+  }
+
+  function stepClearChain(){
+    // 連鎖処理：消去→落下→また消去… なくなるまで繰り返し
+    chain = 0;
+    let totalCleared = 0;
+    while(true){
+      const cleared = clearGroups();
+      if(!cleared) break;
+      chain++;
+      totalCleared += cleared;
+      score += cleared * 10 * chain; // 簡易スコア：個数×10×チェイン倍率
+      updateHUD();
+      applyGravity();
+    }
+  }
+
+  function levelUpIfNeeded(){
+    const newLevel = 1 + Math.floor(score / 400);
+    if(newLevel !== level){
+      level = newLevel;
+      interval = Math.max(MIN_INTERVAL, START_INTERVAL - (level-1) * 60);
+      updateHUD();
+    }
+  }
+
+  function updateHUD(){
+    scoreEl.textContent = score;
+    chainEl.textContent = chain;
+    levelEl.textContent = level;
+  }
+
+  function drawCell(x,y,color){
+    const px=x*CELL, py=y*CELL;
+    // 背景セル
+    ctx.fillStyle = '#0b1020';
+    ctx.fillRect(px,py,CELL-1,CELL-1);
+
+    if(color){
+      // ぷよ：丸っこい見た目
+      const cx=px+CELL/2, cy=py+CELL/2, r=CELL*0.38;
+      const grad = ctx.createRadialGradient(cx-r*0.5, cy-r*0.6, r*0.1, cx, cy, r);
+      grad.addColorStop(0, 'rgba(255,255,255,0.35)');
+      grad.addColorStop(1, color);
+      ctx.fillStyle = grad;
+      ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.15)'; ctx.lineWidth = 2; ctx.stroke();
+    } else {
+      // 空セルのグリッド薄線
+      ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+      ctx.strokeRect(px+0.5,py+0.5,CELL-2, CELL-2);
+    }
+  }
+
+  function render(){
+    // 盤面
+    ctx.clearRect(0,0,canvas.width, canvas.height);
+    for(let y=0;y<ROWS;y++){
+      for(let x=0;x<COLS;x++){
+        drawCell(x,y, COLORS[grid[y][x]]);
+      }
+    }
+    // 落下中のペア
+    if(active && running){
+      for(const c of pairCells(active)){
+        if(inBounds(c.x,c.y)) drawCell(c.x,c.y, COLORS[c.color]);
+      }
+    }
+  }
+
+  function tryMove(dx,dy){
+    if(!running) return;
+    const test = {...active, x: active.x+dx, y: active.y+dy};
+    if(!collides(test)) active = test;
+  }
+
+  function rotate(){
+    if(!running) return;
+    const test = {...active, dir: (active.dir+1)&3};
+    // 壁キック簡易版
+    if(!collides(test)) { active = test; return; }
+    const kicks = [[1,0],[-1,0],[0,-1]]; // 右/左/上
+    for(const [kx,ky] of kicks){
+      const t2 = {...test, x: active.x + kx, y: active.y + ky};
+      if(!collides(t2)) { active = t2; return; }
+    }
+  }
+
+  function hardDrop(){
+    if(!running) return;
+    while(true){
+      const test = {...active, y: active.y+1};
+      if(collides(test)) break; else active = test;
+    }
+    // 接地
+    lockPair();
+    stepClearChain();
+    levelUpIfNeeded();
+    spawn();
+  }
+
+  function tick(timestamp){
+    if(!running){ render(); return;
+    }
+    const fallSpeed = softDrop ? Math.max(90, interval*SOFT_DROP_FACTOR) : interval;
+    if(timestamp - lastFall > fallSpeed){
+      lastFall = timestamp;
+      const test = {...active, y: active.y+1};
+      if(!collides(test)){
+        active = test;
+      } else {
+        // 接地 → 固定 → 連鎖処理 → 新規スポーン
+        lockPair();
+        stepClearChain();
+        levelUpIfNeeded();
+        spawn();
+      }
+    }
+    render();
+    requestAnimationFrame(tick);
+  }
+
+  // ===== Input =====
+  window.addEventListener('keydown', (e) => {
+    if(e.repeat) return;
+    switch(e.code){
+      case 'ArrowLeft': tryMove(-1,0); break;
+      case 'ArrowRight': tryMove(1,0); break;
+      case 'ArrowUp': rotate(); break;
+      case 'ArrowDown': softDrop = true; break;
+      case 'Space': e.preventDefault(); hardDrop(); break;
+    }
+  });
+  window.addEventListener('keyup', (e)=>{
+    if(e.code==='ArrowDown') softDrop=false;
+  });
+
+  // On-screen buttons for mobile / convenience
+  btnLeft.onclick = () => tryMove(-1,0);
+  btnRight.onclick = () => tryMove(1,0);
+  btnRot.onclick = () => rotate();
+  btnSoft.onpointerdown = () => { softDrop = true; };
+  btnSoft.onpointerup = () => { softDrop = false; };
+  btnHard.onclick = () => hardDrop();
+
+  startBtn.onclick = () => start();
+
+  function start(){
+    grid = emptyGrid();
+    score = 0; level = 1; chain = 0; interval = START_INTERVAL;
+    gameOver = false; running = true; stateEl.textContent = 'PLAYING';
+    nextPair = newPair();
+    spawn();
+    updateHUD();
+    lastFall = performance.now();
+    requestAnimationFrame(tick);
+  }
+
+  // 初期描画
+  grid = emptyGrid();
+  render();
+})();
+</script>
+</body>
+</html>
